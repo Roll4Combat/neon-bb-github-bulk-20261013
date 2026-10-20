@@ -9,6 +9,7 @@ on:
         default: write
         type: choice
         options:
+          - diagnose
           - write
           - truncate
 
@@ -25,10 +26,39 @@ jobs:
         run: |
           set -euo pipefail
 
-          project_json="$(curl --fail-with-body --silent --show-error \
+          test -n "${NEON_API_KEY}"
+          test -n "${NEON_PROJECT_ID}"
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "${workdir}"' EXIT
+
+          me_status="$(curl --silent --show-error --output "${workdir}/me.json" --write-out '%{http_code}' \
+            --url "https://console.neon.tech/api/v2/users/me" \
+            --header "Authorization: Bearer ${NEON_API_KEY}" \
+            --header "X-Bug-Bounty: ryan@arcanum-sec.com")"
+          projects_status="$(curl --silent --show-error --output "${workdir}/projects.json" --write-out '%{http_code}' \
+            --url "https://console.neon.tech/api/v2/projects?limit=100" \
+            --header "Authorization: Bearer ${NEON_API_KEY}" \
+            --header "X-Bug-Bounty: ryan@arcanum-sec.com")"
+          project_status="$(curl --silent --show-error --output "${workdir}/project.json" --write-out '%{http_code}' \
             --url "https://console.neon.tech/api/v2/projects/${NEON_PROJECT_ID}" \
             --header "Authorization: Bearer ${NEON_API_KEY}" \
             --header "X-Bug-Bounty: ryan@arcanum-sec.com")"
+          echo "BB_USERS_ME_STATUS=${me_status}"
+          echo "BB_USERS_ME_SHA256=$(sha256sum "${workdir}/me.json" | cut -d' ' -f1)"
+          echo "BB_PROJECTS_LIST_STATUS=${projects_status}"
+          echo "BB_PROJECTS_LIST_SHA256=$(sha256sum "${workdir}/projects.json" | cut -d' ' -f1)"
+          echo "BB_EXACT_PROJECT_STATUS=${project_status}"
+          echo "BB_EXACT_PROJECT_SHA256=$(sha256sum "${workdir}/project.json" | cut -d' ' -f1)"
+          echo "BB_EXACT_PROJECT_ERROR_CODE=$(jq -r '.code // empty' "${workdir}/project.json")"
+          if [ "${PROOF_MODE}" = "diagnose" ]; then
+            test "${me_status}" = "200"
+            test "${projects_status}" = "200"
+            test "${project_status}" = "404"
+            exit 0
+          fi
+
+          test "${project_status}" = "200"
+          project_json="$(cat "${workdir}/project.json")"
           branch_id="$(printf '%s' "${project_json}" | jq -r '.project.default_branch_id // .default_branch_id')"
           test -n "${branch_id}"
           test "${branch_id}" != "null"
